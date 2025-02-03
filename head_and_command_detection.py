@@ -23,7 +23,7 @@ def command(face_i, face_j, width, height, debug):
         print('right')
     elif ORIGINAL_I - centroid_i > NO_MOVEMENT_HORIZONTAL:
         print('left')
-    elif ORIGINAL_J - centroid_j > NO_MOVEMENT_VERTICAL:
+    elif ORIGINAL_J - centroid_j + 5 > NO_MOVEMENT_VERTICAL:
         print('up')
     elif centroid_j - ORIGINAL_J > NO_MOVEMENT_VERTICAL:
         print('down')
