@@ -3,13 +3,42 @@
 import { useState, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Video, VideoOff, Play, Pause } from "lucide-react"
+import {
+  ArrowUp,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  Crosshair,
+  Video,
+  VideoOff,
+  Play,
+  Pause,
+} from "lucide-react"
+import { CALIBRATE_URL, HEAD_DIRECTION_URL, type HeadDirectionResponse } from "@/lib/backend"
 
 interface HeadMovementIndicatorProps {
   isActive: boolean
   onToggle: () => void
   direction: string
   onDirectionChange: (direction: string) => void
+}
+
+/** What the tracker is currently able to do, for display. */
+type TrackerState =
+  | "disconnected"
+  | "unreachable"
+  | "no-camera"
+  | "no-marker"
+  | "calibrating"
+  | "tracking"
+
+const STATE_LABELS: Record<TrackerState, { text: string; tone: string }> = {
+  disconnected: { text: "Disconnected", tone: "text-slate-400" },
+  unreachable: { text: "Cannot reach the tracking backend", tone: "text-red-400" },
+  "no-camera": { text: "Backend running, but no camera", tone: "text-red-400" },
+  "no-marker": { text: "Green marker not visible", tone: "text-amber-400" },
+  calibrating: { text: "Hold still — calibrating…", tone: "text-amber-400" },
+  tracking: { text: "Tracking", tone: "text-green-500" },
 }
 
 export default function HeadMovementIndicator({
@@ -20,54 +49,71 @@ export default function HeadMovementIndicator({
 }: HeadMovementIndicatorProps) {
   const [simulationActive, setSimulationActive] = useState(false)
   const [headDirection, setHeadDirection] = useState("none")
-  const [connectionStatus, setConnectionStatus] = useState("Disconnected")
+  const [trackerState, setTrackerState] = useState<TrackerState>("disconnected")
+  const [calibrateMessage, setCalibrateMessage] = useState<string | null>(null)
 
-  // Connect to Flask backend when active
+  // Poll the tracking backend while head control is enabled.
   useEffect(() => {
-    let interval: NodeJS.Timeout
-
-    if (isActive) {
-      // Poll the Flask backend for head movement data
-      interval = setInterval(async () => {
-        try {
-          const response = await fetch("http://localhost:5000/head_direction")
-          const data = await response.json()
-
-          setConnectionStatus("Connected")
-
-          if (data.direction) {
-            setHeadDirection(data.direction)
-
-            // Only update the actual direction if simulation is active
-            if (simulationActive) {
-              onDirectionChange(data.direction)
-            }
-          }
-        } catch (error) {
-          console.error("Error fetching head movement data:", error)
-          setConnectionStatus("Error: Cannot connect to Flask backend")
-
-          // Fallback to simulation if connection fails
-          if (simulationActive) {
-            const directions = ["left", "right", "up", "down", "none", "none", "none"]
-            const randomIndex = Math.floor(Math.random() * directions.length)
-            const newDirection = directions[randomIndex]
-            setHeadDirection(newDirection)
-
-            if (simulationActive) {
-              onDirectionChange(newDirection)
-            }
-          }
-        }
-      }, 200)
-    } else {
-      setConnectionStatus("Disconnected")
+    if (!isActive) {
+      setTrackerState("disconnected")
+      return
     }
+
+    let cancelled = false
+
+    const poll = async () => {
+      try {
+        const response = await fetch(HEAD_DIRECTION_URL)
+        const data: HeadDirectionResponse = await response.json()
+        if (cancelled) return
+
+        setTrackerState(
+          !data.cameraOk
+            ? "no-camera"
+            : !data.detected
+              ? "no-marker"
+              : !data.calibrated
+                ? "calibrating"
+                : "tracking",
+        )
+
+        const next = data.direction ?? "none"
+        setHeadDirection(next)
+        if (simulationActive) onDirectionChange(next)
+      } catch (error) {
+        if (cancelled) return
+        console.error("Error fetching marker tracking data:", error)
+        setTrackerState("unreachable")
+
+        // Stop the chair rather than inventing input. Feeding random
+        // directions here would let a whole training session run on noise
+        // while looking exactly like a working one.
+        setHeadDirection("none")
+        if (simulationActive) onDirectionChange("none")
+      }
+    }
+
+    const interval = setInterval(poll, 200)
+    poll()
 
     return () => {
-      if (interval) clearInterval(interval)
+      cancelled = true
+      clearInterval(interval)
     }
   }, [isActive, simulationActive, onDirectionChange])
+
+  const handleCalibrate = async () => {
+    setCalibrateMessage(null)
+    try {
+      const response = await fetch(CALIBRATE_URL, { method: "POST" })
+      const data = await response.json()
+      setCalibrateMessage(
+        data.ok ? "Neutral position set." : (data.error ?? "Calibration failed."),
+      )
+    } catch {
+      setCalibrateMessage("Could not reach the tracking backend.")
+    }
+  }
 
   const handleToggleSimulation = () => {
     setSimulationActive(!simulationActive)
@@ -92,17 +138,26 @@ export default function HeadMovementIndicator({
   return (
     <Card className="bg-slate-800 border-slate-700 text-white">
       <CardHeader>
-        <CardTitle className="text-xl">Head Movement Control</CardTitle>
+        <CardTitle className="text-xl">Head gesture control</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Connection status */}
+        {/* Tracker status. "Holding still" and "marker not visible" both send
+            no direction, so they must be distinguishable here. */}
         <div className="text-sm text-center">
           <p>
             Status:{" "}
-            <span className={connectionStatus === "Connected" ? "text-green-500" : "text-red-500"}>
-              {connectionStatus}
+            <span className={STATE_LABELS[trackerState].tone}>
+              {STATE_LABELS[trackerState].text}
             </span>
           </p>
+          {trackerState === "unreachable" && (
+            <p className="text-xs text-slate-500 mt-1">
+              Start it with{" "}
+              <code className="text-slate-400">
+                python3 backend/head_movement_detection.py
+              </code>
+            </p>
+          )}
         </div>
 
         {/* Head visualization */}
@@ -163,6 +218,26 @@ export default function HeadMovementIndicator({
               )}
             </Button>
           </div>
+
+          {isActive && (
+            <>
+              <Button
+                variant="outline"
+                className="w-full border-slate-600"
+                onClick={handleCalibrate}
+              >
+                <Crosshair className="h-4 w-4 mr-2" />
+                Set neutral position
+              </Button>
+              <p className="text-xs text-slate-500 text-center">
+                Face straight ahead, then press this. All gestures are measured
+                from that position.
+              </p>
+              {calibrateMessage && (
+                <p className="text-xs text-center text-slate-300">{calibrateMessage}</p>
+              )}
+            </>
+          )}
 
           {isActive && (
             <Button
